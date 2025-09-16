@@ -9,14 +9,90 @@
 ANativeWindow* g_native_window = NULL;
 static void* g_vulkan_library_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_vkGetInstanceProcAddr_real = NULL;
-
-// NEW: Add a function pointer for the real vkEnumerateInstanceExtensionProperties
+static VkInstance g_last_instance = VK_NULL_HANDLE;
 static PFN_vkEnumerateInstanceExtensionProperties g_vkEnumerateInstanceExtensionProperties_real = NULL;
-
 static PFN_vkCreateInstance g_vkCreateInstance_real = NULL;
+
+/*
+ * vkGetPhysicalDeviceQueueFamilyProperties
+ * ----------------------------------------
+ * This function is exported directly to solve dynamic linking errors.
+ * It queries the properties of available queue families for a given physical device.
+ * This is a pass-through wrapper that uses the stored global instance handle
+ * to retrieve the real function pointer.
+ */
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
+    VkPhysicalDevice        physicalDevice,
+    uint32_t* pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties* pQueueFamilyProperties)
+{
+    printf("LynxVK: Intercepted vkGetPhysicalDeviceQueueFamilyProperties (direct export).\n");
+
+    // We must have a valid instance handle stored from vkCreateInstance
+    if (g_last_instance == VK_NULL_HANDLE) {
+        fprintf(stderr, "LYNXVK ERROR: Cannot get queue family properties because instance handle is NULL.\n");
+        // We can't return an error code, so we might have to just return
+        // and hope the app handles the count being zero.
+        if (pQueueFamilyPropertyCount) {
+            *pQueueFamilyPropertyCount = 0;
+        }
+        return;
+    }
+
+    // Get the real function pointer from the driver using the stored instance.
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties_real =
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties)g_vkGetInstanceProcAddr_real(g_last_instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+
+    if (!vkGetPhysicalDeviceQueueFamilyProperties_real) {
+        fprintf(stderr, "LYNXVK ERROR: Failed to get real vkGetPhysicalDeviceQueueFamilyProperties function pointer.\n");
+        if (pQueueFamilyPropertyCount) {
+            *pQueueFamilyPropertyCount = 0;
+        }
+        return;
+    }
+
+    // printf("LynxVK: --> Calling real vkGetPhysicalDeviceQueueFamilyProperties.\n");
+
+    // Call the real function with the exact same arguments.
+    vkGetPhysicalDeviceQueueFamilyProperties_real(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+}
+
+
+
+/*
+ * vkEnumeratePhysicalDevices
+ * --------------------------
+ * This function is exported directly to solve dynamic linking errors.
+ * Some applications link directly to this function instead of querying its
+ * pointer via vkGetInstanceProcAddr. We must provide it.
+ * This is a simple pass-through wrapper.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(
+    VkInstance          instance,
+    uint32_t* pPhysicalDeviceCount,
+    VkPhysicalDevice* pPhysicalDevices)
+{
+    printf("LynxVK: Intercepted vkEnumeratePhysicalDevices (direct export).\n");
+
+    // Get the real function pointer from the driver using the instance.
+    // This is the standard, correct way to get instance-level functions.
+    PFN_vkEnumeratePhysicalDevices vkEnumeratePhysicalDevices_real =
+        (PFN_vkEnumeratePhysicalDevices)g_vkGetInstanceProcAddr_real(instance, "vkEnumeratePhysicalDevices");
+
+    if (!vkEnumeratePhysicalDevices_real) {
+        fprintf(stderr, "LYNXVK ERROR: Failed to get real vkEnumeratePhysicalDevices function pointer.\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    printf("LynxVK: --> Calling real vkEnumeratePhysicalDevices.\n");
+
+    // Call the real function with the exact same arguments.
+    return vkEnumeratePhysicalDevices_real(instance, pPhysicalDeviceCount, pPhysicalDevices);
+}
 
 __attribute__((constructor))
 void lynxvk_initialize() {
+    printf("LYNXVK_LOG: initalizing...\n");
     if (g_vulkan_library_handle) {
         return;
     }
@@ -164,7 +240,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         fprintf(stderr, "LYNXVK ERROR: Real function for vkCreateInstance is NULL. Was it loaded in initialize?\n");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-
     // We need to modify the requested extensions.
     // Create a new list on the stack. 64 slots should be more than enough.
     const char* modified_extensions[64];
@@ -206,6 +281,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
     modified_create_info.enabledExtensionCount = modified_count;
 
     printf("LynxVK: Calling real vkCreateInstance with modified extensions.\n");
+    // Inside your vkCreateInstance wrapper, after the real function call succeeds:
+
+    VkResult result = vkCreateInstance_real(pModifiedCreateInfo, pAllocator, pInstance);
+
+    if (result == VK_SUCCESS) {
+        printf("LynxVK: --> Real vkCreateInstance succeeded. Storing instance handle.\n");
+        g_last_instance = *pInstance;
+    }
+
     return g_vkCreateInstance_real(&modified_create_info, pAllocator, pInstance);
 }
 
