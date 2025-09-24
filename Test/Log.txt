@@ -1,0 +1,71 @@
+[KHUNG HÌNH 4] vkAcquireNextImageKHR:
+  |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148500 (khi ảnh sẵn sàng)
+  |-- Sẽ báo hiệu Fence      : 0x0
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 4] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 4] vkCmdClearColorImage: Xóa ảnh 0xb400006fc7022380 thành màu (0.00, 0.00, 0.50, 1.00).
+[KHUNG HÌNH 4] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 4] vkQueueSubmit:
+  |-- Sẽ báo hiệu Fence : 0xb400006fc7148700 (khi hoàn thành)
+  |-- Lô #0:
+  |   |-- Đợi Semaphore    : 0xb400006fc7148500
+  |   |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148600
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 4] vkQueuePresentKHR:
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+
+ <<<<<<<<<< KẾT THÚC KHUNG HÌNH 4 >>>>>>>>>> 
+
+[KHUNG HÌNH 5] vkAcquireNextImageKHR:
+  |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148500 (khi ảnh sẵn sàng)
+  |-- Sẽ báo hiệu Fence      : 0x0
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 5] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 5] vkCmdClearColorImage: Xóa ảnh 0xb400006fc7022700 thành màu (0.00, 0.00, 0.50, 1.00).
+[KHUNG HÌNH 5] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 5] vkQueueSubmit:
+  |-- Sẽ báo hiệu Fence : 0xb400006fc7148700 (khi hoàn thành)
+  |-- Lô #0:
+  |   |-- Đợi Semaphore    : 0xb400006fc7148500
+  |   |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148600
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 5] vkQueuePresentKHR:
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+
+ <<<<<<<<<< KẾT THÚC KHUNG HÌNH 5 >>>>>>>>>> 
+
+[KHUNG HÌNH 6] vkAcquireNextImageKHR:
+  |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148500 (khi ảnh sẵn sàng)
+  |-- Sẽ báo hiệu Fence      : 0x0
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 6] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 6] vkCmdClearColorImage: Xóa ảnh 0xb400006fc7022a80 thành màu (0.00, 0.00, 0.50, 1.00).
+[KHUNG HÌNH 6] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 6] vkQueueSubmit:
+  |-- Sẽ báo hiệu Fence : 0xb400006fc7148700 (khi hoàn thành)
+  |-- Lô #0:
+  |   |-- Đợi Semaphore    : 0xb400006fc7148500
+  |   |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148600
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 6] vkQueuePresentKHR:
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+
+ <<<<<<<<<< KẾT THÚC KHUNG HÌNH 6 >>>>>>>>>> 
+
+[KHUNG HÌNH 7] vkAcquireNextImageKHR:
+  |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148500 (khi ảnh sẵn sàng)
+  |-- Sẽ báo hiệu Fence      : 0x0
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 7] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 7] vkCmdClearColorImage: Xóa ảnh 0xb400006fc7022e00 thành màu (0.00, 0.00, 0.50, 1.00).
+[KHUNG HÌNH 7] vkCmdPipelineBarrier: Đặt một rào cản đồng bộ hóa.
+[KHUNG HÌNH 7] vkQueueSubmit:
+  |-- Sẽ báo hiệu Fence : 0xb400006fc7148700 (khi hoàn thành)
+  |-- Lô #0:
+  |   |-- Đợi Semaphore    : 0xb400006fc7148500
+  |   |-- Sẽ báo hiệu Semaphore : 0xb400006fc7148600
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+[KHUNG HÌNH 7] vkQueuePresentKHR:
+  |-- TRẢ VỀ: VK_SUCCESS (0)
+
+ <<<<<<<<<< KẾT THÚC KHUNG HÌNH 7 >>>>>>>>>> 
