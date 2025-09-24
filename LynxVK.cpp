@@ -25,6 +25,8 @@ static PFN_vkResetFences g_vkResetFences_real = nullptr;
 static PFN_vkAllocateMemory g_vkAllocateMemory_real = nullptr;
 static PFN_vkFreeMemory g_vkFreeMemory_real = nullptr;
 static PFN_vkCreateSwapchainKHR g_vkCreateSwapchainKHR_real = nullptr;
+static PFN_vkAcquireNextImageKHR g_vkAcquireNextImageKHR_real = nullptr;
+
 static uint64_t g_frame_counter = 0;
 //record Allocated memory
 static PFN_vkMapMemory g_vkMapMemory_real = nullptr;
@@ -323,7 +325,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         fprintf(stderr,"LynxVK: vkGetPhysicalDeviceFeatures2 --> call on getInstanceProcAddr\n");
         return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
     }
-
+/*
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0) {
+        fprintf(stderr,"LynxVK: vkGetPhysicalDeviceFeatures2 --> call on getInstanceProcAddr\n");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
+    }
+*/
 	//check
     if (g_vkGetInstanceProcAddr_real == NULL) {
         fprintf(stderr, "LYNXVK ERROR: Real vkGetInstanceProcAddr is NULL during pass-through.\n");
@@ -410,8 +417,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         // This is your line 286. It is correct.
         g_last_instance = *pInstance;
         fprintf(stderr, "  [INFO] Đã lưu trữ VkInstance handle (%p) vào biến toàn cục.\n", (void*)g_last_instance);
-
-        // --- THÊM LOGIC MỚI Ở ĐÂY ---
         // Bây giờ chúng ta đã có một g_last_instance hợp lệ,
         // đây là thời điểm hoàn hảo để lấy các con trỏ hàm cốt lõi khác.
         fprintf(stderr, "  [INFO] Lấy các con trỏ hàm cốt lõi sau khi tạo instance...\n");
@@ -430,7 +435,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         } else {
             fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkQueuePresentKHR gốc.\n");
         }
-        // Bạn cũng có thể lấy các con trỏ hàm cốt lõi khác ở đây nếu cần, ví dụ:
         // g_vkWaitForFences_real = (PFN_vkWaitForFences)g_vkGetInstanceProcAddr_real(g_last_instance, "vkWaitForFences")
 	g_vkResetFences_real = (PFN_vkResetFences)g_vkGetInstanceProcAddr_real(g_last_instance, "vkResetFences");
         if (!g_vkResetFences_real) {
@@ -470,8 +474,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         } else {
             fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkCreateSwapchainKHR gốc.\n");
         }
-
-
+	g_vkAcquireNextImageKHR_real = (PFN_vkAcquireNextImageKHR)g_vkGetInstanceProcAddr_real(g_last_instance, "vkAcquireNextImageKHR");
+	if (!g_vkAcquireNextImageKHR_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkAcquireNextImageKHR gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkAcquireNextImageKHR gốc.\n");
+        }
     } else {
             fprintf(stderr, "LYNXVK WARNING: Real vkCreateInstance failed with error %d. Instance handle not stored.\n", result);
         }
@@ -1194,10 +1202,10 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     }
     VkSwapchainKHR real_swapchain = it->second;
 
-    PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR_real = 
-        (PFN_vkAcquireNextImageKHR)g_vkGetDeviceProcAddr_real(device, "vkAcquireNextImageKHR");
+    //PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR_real = 
+      //  (PFN_vkAcquireNextImageKHR)g_vkGetDeviceProcAddr_real(device, "vkAcquireNextImageKHR");
 
-    if (!vkAcquireNextImageKHR_real) {
+    if (!g_vkAcquireNextImageKHR_real) {
         fprintf(stderr, "LYNXVK ERROR: Không thể lấy con trỏ hàm vkAcquireNextImageKHR gốc.\n");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
@@ -1207,15 +1215,14 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     fprintf(stderr, "  |-- Sẽ báo hiệu Semaphore : %p (khi ảnh sẵn sàng)\n", (void*)semaphore);
     fprintf(stderr, "  |-- Sẽ báo hiệu Fence      : %p\n", (void*)fence);
 
-    VkResult result = vkAcquireNextImageKHR_real(device, real_swapchain, timeout, semaphore, fence, pImageIndex);
+    VkResult result = g_vkAcquireNextImageKHR_real(device, real_swapchain, timeout, semaphore, fence, pImageIndex);
 
     fprintf(stderr, "  |-- TRẢ VỀ: %s (%d)\n", VulkanResultToString(result), result);
     return result;
 }
 
 // ==========================================================================================
-// Wrapper cho vkQueueSubmit (Theo dõi Semaphore)
-// Hãy thay thế hàm cũ của bạn bằng hàm này.
+// Wrapper cho vkQueueSubmit
 // ==========================================================================================
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
     VkQueue             queue,
