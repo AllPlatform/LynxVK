@@ -5,10 +5,12 @@
 #include <native_surface/extern_function.h>
 #include "lynxvk.h"
 #include <map>
+#include <cstdint>
 // --- GLOBAL VARIABLES ---
 
 ANativeWindow* g_native_window = NULL;
 static void* g_vulkan_library_handle = NULL;
+static VkDevice g_vkDevice = VK_NULL_HANDLE;
 static PFN_vkGetInstanceProcAddr g_vkGetInstanceProcAddr_real = NULL;
 static VkInstance g_last_instance = VK_NULL_HANDLE;
 static PFN_vkEnumerateInstanceExtensionProperties g_vkEnumerateInstanceExtensionProperties_real = NULL;
@@ -17,6 +19,44 @@ static PFN_vkGetDeviceProcAddr g_vkGetDeviceProcAddr_real = nullptr;
 static std::map<VkSurfaceKHR, VkSurfaceKHR> g_surface_map;
 static std::map<VkSwapchainKHR, VkSwapchainKHR> g_swapchain_map;
 static PFN_vkEnumerateInstanceVersion g_vkEnumerateInstanceVersion_real = nullptr;
+static PFN_vkQueueSubmit g_vkQueueSubmit_real = nullptr;
+static PFN_vkQueuePresentKHR g_vkQueuePresentKHR_real = nullptr;
+static PFN_vkResetFences g_vkResetFences_real = nullptr;
+static PFN_vkAllocateMemory g_vkAllocateMemory_real = nullptr;
+static PFN_vkFreeMemory g_vkFreeMemory_real = nullptr;
+static PFN_vkCreateSwapchainKHR g_vkCreateSwapchainKHR_real = nullptr;
+static uint64_t g_frame_counter = 0;
+//record Allocated memory
+static PFN_vkMapMemory g_vkMapMemory_real = nullptr;
+static PFN_vkUnmapMemory g_vkUnmapMemory_real = nullptr;
+static uint64_t g_total_allocated_memory = 0; // Tổng số byte đã cấp phát
+static std::map<VkDeviceMemory, VkDeviceSize> g_memory_allocation_map; // Map để nhớ kích thước của mỗi lần cấp phát
+const char* VulkanResultToString(VkResult result);
+VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderICDInterfaceVersion(uint32_t* pSupportedVersion) {
+    printf("--- LYNXVK DEBUG: vkNegotiateLoaderICDInterfaceVersion được gọi ---\n");
+    
+    const uint32_t minimum_supported_version = 5;
+
+    if (*pSupportedVersion < minimum_supported_version) {
+        *pSupportedVersion = minimum_supported_version;
+    }
+    
+    printf("    -> Báo cáo phiên bản hỗ trợ: %u\n", *pSupportedVersion);
+    // fflush(stdout) đảm bảo log được in ra ngay lập tức, rất hữu ích khi debug.
+    fflush(stdout);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
+    printf("--- LYNXVK DEBUG: vk_icdGetInstanceProcAddr cho hàm: %s ---\n", pName);
+    fflush(stdout);
+
+    if (strcmp(pName, "vkNegotiateLoaderICDInterfaceVersion") == 0) {
+        return (PFN_vkVoidFunction)vkNegotiateLoaderICDInterfaceVersion;
+    }
+
+    // Chuyển tiếp tới hàm vkGetInstanceProcAddr đã được intercept của chúng ta để xử lý.
+    return vkGetInstanceProcAddr(instance, pName);
+}
 
 /*
  * vkGetPhysicalDeviceQueueFamilyProperties
@@ -158,6 +198,9 @@ void lynxvk_initialize() {
         printf("LynxVK INFO: Không tìm thấy 'vkEnumerateInstanceVersion' qua dlsym. Có thể đây là hệ thống Vulkan 1.0.\n");
     }
 
+    // Thêm đoạn mã này vào CUỐI hàm lynxvk_initialize() của bạn
+
+// Lấy con trỏ tới hàm vkQueueSubmit gốc và lưu lại để sử dụng sau này.
 
 }
 
@@ -237,17 +280,55 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
 	return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
     }
+
+    //vk_icdGetInstanceProcAddr
+    if (strcmp(pName, "vk_icdGetInstanceProcAddr") == 0) {
+	printf("LynxVK: --> vk_icdGetInstanceProcAddr\n");
+	return (PFN_vkVoidFunction)vk_icdGetInstanceProcAddr;
+    }
+
+    //vkCreateDevice
+    if (strcmp(pName, "vkCreateDevice") == 0) {
+	fprintf(stderr,"LynxVK: vkCreateDevice --> call on getInstanceProcAddr\n");
+	return (PFN_vkVoidFunction)vkCreateDevice;
+    }
+    //vkAcquireNextImageKHR
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0) {
+	fprintf(stderr,"LynxVK: vkAcquireNextImageKHR --> call on getInstanceProcAddr\n");
+	return (PFN_vkVoidFunction)vkAcquireNextImageKHR;
+    }
   // ... các else if khác ...
 
+    //vkGetSwapchainImagesKHR
+    if (strcmp(pName, "vkGetSwapchainImagesKHR") == 0) {
+        fprintf(stderr,"LynxVK: vkGetSwapchainImagesKHR --> call on getInstanceProcAddr\n");
+        return (PFN_vkVoidFunction)vkGetSwapchainImagesKHR;
+    }
+    //vkCreateSwapchainKHR
+    if (strcmp(pName, "vkCreateSwapchainKHR") == 0) {
+        fprintf(stderr,"LynxVK: vkCreateSwapchainKHR --> call on getInstanceProcAddr\n");
+        return (PFN_vkVoidFunction)vkCreateSwapchainKHR;
+    }
     // --- PASS-THROUGH LOGIC ---
     // If the function is not one of the ones we're wrapping,
     // just call the real vkGetInstanceProcAddr and return its result.
 
+    //vkGetPhysicalDeviceXlibPresentationSupportKHR
+    if (strcmp(pName, "vkGetPhysicalDeviceXlibPresentationSupportKHR") == 0) {
+        fprintf(stderr,"LynxVK: vkGetPhysicalDeviceXlibPresentationSupportKHR --> call on getInstanceProcAddr\n");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceXlibPresentationSupportKHR;
+    }
+    //vkGetPhysicalDeviceFeatures2
+    if (strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) {
+        fprintf(stderr,"LynxVK: vkGetPhysicalDeviceFeatures2 --> call on getInstanceProcAddr\n");
+        return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
+    }
+
+	//check
     if (g_vkGetInstanceProcAddr_real == NULL) {
         fprintf(stderr, "LYNXVK ERROR: Real vkGetInstanceProcAddr is NULL during pass-through.\n");
         return NULL;
     }
-
     // printf("LynxVK: --> Passing call to real vkGetInstanceProcAddr.\n");
     return g_vkGetInstanceProcAddr_real(instance, pName);
 }
@@ -328,9 +409,72 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
         printf("LynxVK: --> Real vkCreateInstance succeeded. Storing instance handle for later use.\n");
         // This is your line 286. It is correct.
         g_last_instance = *pInstance;
+        fprintf(stderr, "  [INFO] Đã lưu trữ VkInstance handle (%p) vào biến toàn cục.\n", (void*)g_last_instance);
+
+        // --- THÊM LOGIC MỚI Ở ĐÂY ---
+        // Bây giờ chúng ta đã có một g_last_instance hợp lệ,
+        // đây là thời điểm hoàn hảo để lấy các con trỏ hàm cốt lõi khác.
+        fprintf(stderr, "  [INFO] Lấy các con trỏ hàm cốt lõi sau khi tạo instance...\n");
+
+        g_vkQueueSubmit_real = (PFN_vkQueueSubmit)g_vkGetInstanceProcAddr_real(g_last_instance, "vkQueueSubmit");
+
+        if (!g_vkQueueSubmit_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkQueueSubmit gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkQueueSubmit gốc.\n");
+        }
+
+	g_vkQueuePresentKHR_real = (PFN_vkQueuePresentKHR)g_vkGetInstanceProcAddr_real(g_last_instance, "vkQueuePresentKHR");
+        if (!g_vkQueuePresentKHR_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkQueuePresentKHR gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkQueuePresentKHR gốc.\n");
+        }
+        // Bạn cũng có thể lấy các con trỏ hàm cốt lõi khác ở đây nếu cần, ví dụ:
+        // g_vkWaitForFences_real = (PFN_vkWaitForFences)g_vkGetInstanceProcAddr_real(g_last_instance, "vkWaitForFences")
+	g_vkResetFences_real = (PFN_vkResetFences)g_vkGetInstanceProcAddr_real(g_last_instance, "vkResetFences");
+        if (!g_vkResetFences_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkResetFences gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkResetFences gốc.\n");
+        }
+	g_vkAllocateMemory_real = (PFN_vkAllocateMemory)g_vkGetInstanceProcAddr_real(g_last_instance, "vkAllocateMemory");
+        if (!g_vkAllocateMemory_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkAllocateMemory gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkAllocateMemory gốc.\n");
+        }
+
+        g_vkFreeMemory_real = (PFN_vkFreeMemory)g_vkGetInstanceProcAddr_real(g_last_instance, "vkFreeMemory");
+        if (!g_vkFreeMemory_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkFreeMemory gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkFreeMemory gốc.\n");
+        }
+	g_vkMapMemory_real = (PFN_vkMapMemory)g_vkGetInstanceProcAddr_real(g_last_instance, "vkMapMemory");
+        if (!g_vkMapMemory_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkMapMemory gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkMapMemory gốc.\n");
+        }
+
+        g_vkUnmapMemory_real = (PFN_vkUnmapMemory)g_vkGetInstanceProcAddr_real(g_last_instance, "vkUnmapMemory");
+        if (!g_vkUnmapMemory_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkUnmapMemory gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkUnmapMemory gốc.\n");
+        }
+	g_vkCreateSwapchainKHR_real = (PFN_vkCreateSwapchainKHR)g_vkGetInstanceProcAddr_real(g_last_instance, "vkCreateSwapchainKHR");
+        if (!g_vkCreateSwapchainKHR_real) {
+            fprintf(stderr, "  [CRITICAL ERROR] LYNXVK: Không thể lấy con trỏ hàm vkCreateSwapchainKHR gốc!\n");
+        } else {
+            fprintf(stderr, "  [INFO] LYNXVK: Đã lấy và lưu trữ thành công con trỏ hàm vkCreateSwapchainKHR gốc.\n");
+        }
+
+
     } else {
-        fprintf(stderr, "LYNXVK WARNING: Real vkCreateInstance failed with error %d. Instance handle not stored.\n", result);
-    }
+            fprintf(stderr, "LYNXVK WARNING: Real vkCreateInstance failed with error %d. Instance handle not stored.\n", result);
+        }
 
     // Cleanup the memory we allocated.
     if (needsFiltering) {
@@ -341,57 +485,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
 
     return result;
 }
-
-/*
- * vkQueueSubmit
- * -------------
- * Chặn lời gọi để gửi một lô công việc (command buffer) cho GPU.
- *
- * Đây là một hàm cực kỳ quan trọng để gỡ lỗi. Bằng cách ghi log ở đây,
- * chúng ta có thể biết được liệu command buffer gây lỗi trong vkEndCommandBuffer
- * có bao giờ được gửi đi hay không.
- */
-
-/*extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
-    VkQueue                 queue,
-    uint32_t                submitCount,
-    const VkSubmitInfo* pSubmits,
-    VkFence                 fence)
-{
-    LYNXVK_LOG("--> LYNXVK: Đã chặn vkQueueSubmit. Số lượng submit: %u\n", submitCount);
-
-    // Ghi log chi tiết về các command buffer được gửi đi
-    if (pSubmits) {
-        for (uint32_t i = 0; i < submitCount; ++i) {
-            LYNXVK_LOG("    LYNXVK: Submit #%u có %u command buffer.\n", i, pSubmits[i].commandBufferCount);
-            for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; ++j) {
-                LYNXVK_LOG("        LYNXVK: CommandBuffer[%u] = %p\n", j, (void*)pSubmits[i].pCommandBuffers[j]);
-            }
-        }
-    }
-
-    // Lấy con trỏ hàm gốc từ driver
-    PFN_vkQueueSubmit vkQueueSubmit_real =
-        (PFN_vkQueueSubmit)g_vkGetDeviceProcAddr_real(g_vkGetDeviceProcAddr_real ? (VkDevice)0 : (VkDevice)g_last_instance, "vkQueueSubmit");
-
-    if (!vkQueueSubmit_real) {
-        // Cần một cách thông minh hơn để lấy device handle, tạm thời dùng một cách hack
-        // Vì g_vkGetDeviceProcAddr_real có thể là null, chúng ta cần một device hợp lệ
-        // Lấy device từ queue là một cách, nhưng phức tạp. Tạm thời dùng cách đơn giản.
-        // Đây là một giả định: hầu hết các ứng dụng sẽ lấy hàm này từ g_last_instance
-         vkQueueSubmit_real = (PFN_vkQueueSubmit)g_vkGetInstanceProcAddr_real(g_last_instance, "vkQueueSubmit");
-         if(!vkQueueSubmit_real) {
-              fprintf(stderr, "LYNXVK CRITICAL: Không thể lấy con trỏ hàm vkQueueSubmit gốc!\n");
-              return VK_ERROR_INITIALIZATION_FAILED;
-         }
-    }
-
-    // Gọi hàm gốc
-    VkResult result = vkQueueSubmit_real(queue, submitCount, pSubmits, fence);
-    LYNXVK_LOG("<-- LYNXVK: Rời khỏi vkQueueSubmit với kết quả: %d\n", result);
-    return result;
-}
-*/
 
 /*
  * vkGetDeviceProcAddr
@@ -437,6 +530,22 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     if (strcmp(pName, "vkEndCommandBuffer") == 0) return (PFN_vkVoidFunction)vkEndCommandBuffer;
     if (strcmp(pName, "vkCmdBeginRenderPass") == 0) return (PFN_vkVoidFunction)vkCmdBeginRenderPass;
     if (strcmp(pName, "vkCmdEndRenderPass") == 0) return (PFN_vkVoidFunction)vkCmdEndRenderPass;
+    //vkCreateDevice
+    if (strcmp(pName, "vkCreateDevice") == 0) return (PFN_vkVoidFunction)vkCreateDevice;
+    //vkWaitForFences
+    if (strcmp(pName, "vkWaitForFences") == 0) return (PFN_vkVoidFunction)vkWaitForFences;
+    //vkQueueSubmit
+    if (strcmp(pName, "vkQueueSubmit") == 0) return (PFN_vkVoidFunction)vkQueueSubmit;
+    //vkQueuePresentKHR
+    if (strcmp(pName, "vkQueuePresentKHR") == 0) return (PFN_vkVoidFunction)vkQueuePresentKHR;
+    //vkResetFences
+    if (strcmp(pName, "vkResetFences") == 0) return (PFN_vkVoidFunction)vkResetFences;
+    //memory
+    if (strcmp(pName, "vkAllocateMemory") == 0) return (PFN_vkVoidFunction)vkAllocateMemory;
+    if (strcmp(pName, "vkFreeMemory") == 0) return (PFN_vkVoidFunction)vkFreeMemory;
+    //vkmapmemory
+    if (strcmp(pName, "vkMapMemory") == 0) return (PFN_vkVoidFunction)vkMapMemory;
+    if (strcmp(pName, "vkUnmapMemory") == 0) return (PFN_vkVoidFunction)vkUnmapMemory;
 
     // Nếu không có con trỏ hàm gốc, hãy thử lấy nó ngay bây giờ
     if (!g_vkGetDeviceProcAddr_real) {
@@ -485,98 +594,6 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
     // Gọi hàm gốc để lấy thông tin thật
     vkGetPhysicalDeviceFormatProperties_real(physicalDevice, format, pFormatProperties);
 }
-
-
-
-// --- WRAPPER FUNCTIONS ---
-
-/*
- * vkEnumerateInstanceExtensionProperties
- * --------------------------------------
- * NEW: This wrapper intercepts the query for available extensions.
- * Its job is to add fake X11-related extensions to the list returned
- * by the real Android driver. This is crucial for compatibility.
- */
-
-/*
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
-    const char* pLayerName,
-    uint32_t* pPropertyCount,
-    VkExtensionProperties* pProperties)
-{
-    printf("LynxVK: Intercepted vkEnumerateInstanceExtensionProperties.\n");
-
-    if (g_vkEnumerateInstanceExtensionProperties_real == NULL) {
-        fprintf(stderr, "LYNXVK ERROR: Real function for vkEnumerateInstanceExtensionProperties is NULL.\n");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    // This function can be called in two ways:
-    // 1. With pProperties = NULL, to get the total count of extensions.
-    // 2. With pProperties != NULL, to get the actual extension data.
-    // We must handle both cases correctly.
-
-    // First, get the count and properties from the real driver.
-    uint32_t real_property_count = 0;
-    VkResult result = g_vkEnumerateInstanceExtensionProperties_real(pLayerName, &real_property_count, NULL);
-    if (result != VK_SUCCESS) {
-        return result;
-    }
-
-    // The two extensions we are faking
-    const int FAKE_EXTENSION_COUNT = 2;
-    VkExtensionProperties fake_extensions[FAKE_EXTENSION_COUNT];
-    strcpy(fake_extensions[0].extensionName, VK_KHR_SURFACE_EXTENSION_NAME);
-    fake_extensions[0].specVersion = VK_KHR_SURFACE_SPEC_VERSION;
-    strcpy(fake_extensions[1].extensionName, VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-    fake_extensions[1].specVersion = VK_KHR_XLIB_SURFACE_SPEC_VERSION;
-
-
-    // Case 1: The application is just asking for the count.
-    if (pProperties == NULL) {
-        *pPropertyCount = real_property_count + FAKE_EXTENSION_COUNT;
-        printf("LynxVK: Faking X11 support. Reporting %u total extensions.\n", *pPropertyCount);
-        return VK_SUCCESS;
-    }
-
-    // Case 2: The application wants the actual data.
-    printf("LynxVK: Populating extension list.\n");
-
-    // We call the real function again to fill the user's buffer up to the real count.
-    result = g_vkEnumerateInstanceExtensionProperties_real(pLayerName, pPropertyCount, pProperties);
-
-    // If the buffer was too small for the real extensions, the driver returns VK_INCOMPLETE.
-    // We should respect that and not add our fake extensions.
-    if (result == VK_INCOMPLETE) {
-        return VK_INCOMPLETE;
-    }
-
-    uint32_t provided_capacity = *pPropertyCount;
-    uint32_t copied_count = real_property_count;
-
-    // Now, add our fake extensions if there is space in the user's buffer.
-    if (copied_count < provided_capacity) {
-        pProperties[copied_count] = fake_extensions[0]; // VK_KHR_surface
-        copied_count++;
-    }
-    if (copied_count < provided_capacity) {
-        pProperties[copied_count] = fake_extensions[1]; // VK_KHR_xlib_surface
-        copied_count++;
-    }
-
-    // Finally, update the count and return status according to the Vulkan specification.
-    *pPropertyCount = copied_count;
-
-    // If we couldn't fit all extensions (real + fake) into the provided buffer,
-    // we must return VK_INCOMPLETE.
-    if (copied_count < real_property_count + FAKE_EXTENSION_COUNT) {
-        return VK_INCOMPLETE;
-    }
-
-    return VK_SUCCESS;
-}
-
-*/
 
 /*
  * vkEnumerateDeviceExtensionProperties
@@ -997,6 +1014,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
     return vkGetPhysicalDeviceSurfacePresentModesKHR_real(physicalDevice, real_surface, pPresentModeCount, pPresentModes);
 }
 
+
+
 /*
  * vkCreateSwapchainKHR
  * --------------------
@@ -1010,6 +1029,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
  * 6. Gọi hàm gốc của driver với struct đã được sửa đổi.
  * 7. Nếu thành công, lưu lại handle swapchain mới vào `g_swapchain_map`.
  */
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkDevice                                    device,
     const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -1121,51 +1141,162 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
     return vkGetSwapchainImagesKHR_real(device, real_swapchain, pSwapchainImageCount, pSwapchainImages);
 }
 
-/*
- * vkAcquireNextImageKHR
- * ---------------------
- * Chặn lời gọi để lấy chỉ số của tấm ảnh tiếp theo có sẵn trong swapchain để vẽ.
- * Đây là một trong những hàm quan trọng nhất, được gọi một lần mỗi frame.
- * 1. Nhận handle swapchain từ ứng dụng.
- * 2. Tra cứu handle này trong map `g_swapchain_map` để lấy ra handle thật sự.
- * 3. Gọi hàm gốc của driver với handle thật đó.
- * 4. Các tham số khác như semaphore, fence, và pImageIndex có thể được chuyển thẳng qua.
- */
-VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
+
+// Hàm trợ giúp: Dịch VkResult thành chuỗi ký tự
+// Bạn có thể đặt hàm này ở đâu đó gần đầu file LynxVK.cpp
+const char* VulkanResultToString(VkResult result) {
+    switch (result) {
+        case VK_SUCCESS: return "VK_SUCCESS";
+        case VK_NOT_READY: return "VK_NOT_READY";
+        case VK_TIMEOUT: return "VK_TIMEOUT";
+        case VK_EVENT_SET: return "VK_EVENT_SET";
+        case VK_EVENT_RESET: return "VK_EVENT_RESET";
+        case VK_INCOMPLETE: return "VK_INCOMPLETE";
+        case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+        case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+        case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+        case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+        case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+        case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+        case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+        case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
+        case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+        case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR"; // <<-- KẺ TÌNH NGHI
+        case VK_ERROR_INCOMPATIBLE_DISPLAY_KHR: return "VK_ERROR_INCOMPATIBLE_DISPLAY_KHR";
+        case VK_ERROR_VALIDATION_FAILED_EXT: return "VK_ERROR_VALIDATION_FAILED_EXT";
+        case VK_ERROR_INVALID_SHADER_NV: return "VK_ERROR_INVALID_SHADER_NV";
+        default: return "MÃ LỖI VULKAN KHÔNG XÁC ĐỊNH";
+    }
+}
+
+// ==========================================================================================
+// Wrapper cho vkAcquireNextImageKHR (Theo dõi Semaphore)
+// Hãy thay thế hàm cũ của bạn bằng hàm này.
+// ==========================================================================================
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     VkDevice            device,
     VkSwapchainKHR      swapchain,
     uint64_t            timeout,
-    VkSemaphore         semaphore,
+    VkSemaphore         semaphore, // Semaphore này sẽ được BÁO HIỆU
     VkFence             fence,
     uint32_t* pImageIndex)
 {
-    // Chúng ta không in log ở đây vì hàm này được gọi mỗi frame, sẽ gây spam console.
-    // Chỉ bật log này khi cần gỡ lỗi.
-    // printf("LynxVK: Đã chặn vkAcquireNextImageKHR.\n");
-
-    // Tra cứu handle swapchain được cung cấp trong map của chúng ta.
     auto it = g_swapchain_map.find(swapchain);
     if (it == g_swapchain_map.end()) {
-        // Lỗi này nghiêm trọng vì nó xảy ra trong vòng lặp render.
-        fprintf(stderr, "LYNXVK ERROR: vkAcquireNextImageKHR được gọi với một swapchain handle không xác định.\n");
-        return VK_ERROR_OUT_OF_DATE_KHR; // Một lỗi hợp lý để báo cho ứng dụng tạo lại swapchain.
+        fprintf(stderr, "LYNXVK ERROR: vkAcquireNextImageKHR_real được gọi với một swapchain handle không xác định.\n");
+        return VK_ERROR_DEVICE_LOST;
     }
-
-    // Nếu tìm thấy, lấy ra handle thật.
     VkSwapchainKHR real_swapchain = it->second;
 
-    // Lấy con trỏ hàm thật từ driver
-    PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR_real =
-        (PFN_vkAcquireNextImageKHR)g_vkGetInstanceProcAddr_real(g_last_instance, "vkAcquireNextImageKHR");
+    PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR_real = 
+        (PFN_vkAcquireNextImageKHR)g_vkGetDeviceProcAddr_real(device, "vkAcquireNextImageKHR");
 
     if (!vkAcquireNextImageKHR_real) {
         fprintf(stderr, "LYNXVK ERROR: Không thể lấy con trỏ hàm vkAcquireNextImageKHR gốc.\n");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    
+    // Ghi log chi tiết VÀO ĐÂY
+    fprintf(stderr, "[KHUNG HÌNH %llu] vkAcquireNextImageKHR:\n", (unsigned long long)g_frame_counter);
+    fprintf(stderr, "  |-- Sẽ báo hiệu Semaphore : %p (khi ảnh sẵn sàng)\n", (void*)semaphore);
+    fprintf(stderr, "  |-- Sẽ báo hiệu Fence      : %p\n", (void*)fence);
 
-    // Gọi hàm thật với handle swapchain thật
-    // Các tham số còn lại được truyền thẳng qua.
-    return vkAcquireNextImageKHR_real(device, real_swapchain, timeout, semaphore, fence, pImageIndex);
+    VkResult result = vkAcquireNextImageKHR_real(device, real_swapchain, timeout, semaphore, fence, pImageIndex);
+
+    fprintf(stderr, "  |-- TRẢ VỀ: %s (%d)\n", VulkanResultToString(result), result);
+    return result;
+}
+
+// ==========================================================================================
+// Wrapper cho vkQueueSubmit (Theo dõi Semaphore)
+// Hãy thay thế hàm cũ của bạn bằng hàm này.
+// ==========================================================================================
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
+    VkQueue             queue,
+    uint32_t            submitCount,
+    const VkSubmitInfo* pSubmits,
+    VkFence             fence)
+{
+    fprintf(stderr, "[KHUNG HÌNH %llu] vkQueueSubmit:\n", (unsigned long long)g_frame_counter);
+    fprintf(stderr, "  |-- Sẽ báo hiệu Fence : %p (khi hoàn thành)\n", (void*)fence);
+
+    if (pSubmits) {
+        for (uint32_t i = 0; i < submitCount; ++i) {
+            const VkSubmitInfo* submit_info = &pSubmits[i];
+            fprintf(stderr, "  |-- Lô #%u:\n", i);
+            fprintf(stderr, "  |   |-- Đợi Semaphore    : %p\n", (submit_info->waitSemaphoreCount > 0 ? (void*)submit_info->pWaitSemaphores[0] : NULL));
+            fprintf(stderr, "  |   |-- Sẽ báo hiệu Semaphore : %p\n", (submit_info->signalSemaphoreCount > 0 ? (void*)submit_info->pSignalSemaphores[0] : NULL));
+        }
+    }
+
+    VkResult result = g_vkQueueSubmit_real(queue, submitCount, pSubmits, fence);
+
+    fprintf(stderr, "  |-- TRẢ VỀ: %s (%d)\n", VulkanResultToString(result), result);
+    return result;
+}
+
+// Wrapper cho vkResetFences (Đã sửa lỗi)
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(
+    VkDevice            device,
+    uint32_t            fenceCount,
+    const VkFence* pFences)
+{
+    fprintf(stderr, "--> LYNXVK: Đã vào hàm vkResetFences\n");
+    fprintf(stderr, "  |-- Đang reset %u fence.\n", fenceCount);
+    if (pFences && fenceCount > 0) {
+        fprintf(stderr, "  |-- Fence đầu tiên để reset: %p\n", (void*)pFences[0]);
+    }
+
+    // Bây giờ, chỉ cần gọi trực tiếp con trỏ hàm đã được lưu sẵn.
+    if (!g_vkResetFences_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkResetFences gốc là NULL!\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    
+    VkResult result = g_vkResetFences_real(device, fenceCount, pFences);
+
+    fprintf(stderr, "<-- LYNXVK: Rời khỏi hàm vkResetFences với kết quả: %s (%d)\n", VulkanResultToString(result), result);
+    return result;
+}
+
+
+
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(
+    VkDevice            device,
+    uint32_t            fenceCount,
+    const VkFence* pFences,
+    VkBool32            waitAll,
+    uint64_t            timeout)
+{
+    // Chúng ta sẽ luôn ghi log ở đây vì nó rất quan trọng
+    fprintf(stderr, "--> LYNXVK: Đã vào hàm vkWaitForFences\n");
+    fprintf(stderr, "  |-- Đang đợi %u fence.\n", fenceCount);
+    if (pFences && fenceCount > 0) {
+        // Chỉ in ra fence đầu tiên để log ngắn gọn
+        fprintf(stderr, "  |-- Fence đầu tiên: %p\n", (void*)pFences[0]);
+    }
+    fprintf(stderr, "  |-- Chế độ đợi tất cả (Wait All): %s\n", waitAll ? "VK_TRUE" : "VK_FALSE");
+    fprintf(stderr, "  |-- Thời gian chờ tối đa (Timeout): %llu ns\n", (unsigned long long)timeout);
+
+
+    PFN_vkWaitForFences vkWaitForFences_real =
+        (PFN_vkWaitForFences)g_vkGetDeviceProcAddr_real(device, "vkWaitForFences");
+
+    if (!vkWaitForFences_real) {
+        fprintf(stderr, "  [ERROR] LYNXVK: Không thể lấy con trỏ hàm vkWaitForFences gốc.\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkResult result = vkWaitForFences_real(device, fenceCount, pFences, waitAll, timeout);
+
+    fprintf(stderr, "<-- LYNXVK: Rời khỏi hàm vkWaitForFences với kết quả: %s (%d)\n", VulkanResultToString(result), result);
+    return result;
 }
 
 /*
@@ -1181,56 +1312,65 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
  * 5. Cập nhật con trỏ trong struct bản sao để nó trỏ đến dữ liệu của vector mới.
  * 6. Gọi hàm gốc của driver với struct đã được sửa đổi.
  */
-VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
+// Wrapper cho vkQueuePresentKHR (Đã sửa lỗi)
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     VkQueue                 queue,
     const VkPresentInfoKHR* pPresentInfo)
 {
-    // Giống như vkAcquireNextImageKHR, hàm này được gọi mỗi frame.
-    // Tắt log để tránh spam.
-    // printf("LynxVK: Đã chặn vkQueuePresentKHR.\n");
+    fprintf(stderr, "[KHUNG HÌNH %llu] vkQueuePresentKHR:\n", (unsigned long long)g_frame_counter);
 
-    if (!pPresentInfo) {
-        fprintf(stderr, "LYNXVK ERROR: pPresentInfo trong vkQueuePresentKHR là NULL.\n");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    // -- Bước 1: Chuẩn bị để sửa đổi --
-    // Tạo một vector để chứa các handle swapchain thật. std::vector an toàn hơn mảng C.
-    std::vector<VkSwapchainKHR> realSwapchains(pPresentInfo->swapchainCount);
-
-    // -- Bước 2: Lặp và tra cứu --
-    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i) {
-        VkSwapchainKHR app_swapchain = pPresentInfo->pSwapchains[i];
-        auto it = g_swapchain_map.find(app_swapchain);
-
-        if (it == g_swapchain_map.end()) {
-            fprintf(stderr, "LYNXVK ERROR: vkQueuePresentKHR được gọi với một swapchain handle không xác định.\n");
-            // Không thể tiếp tục nếu một trong các swapchain không hợp lệ.
-            return VK_ERROR_OUT_OF_DATE_KHR;
-        }
-        // Điền handle thật vào vector của chúng ta
-        realSwapchains[i] = it->second;
-    }
-
-    // -- Bước 3: Tạo struct đã sửa đổi --
-    // Sao chép toàn bộ struct gốc
+    // --- BẮT ĐẦU LOGIC ÁNH XẠ SWAPCHAIN ---
+    // Chúng ta không thể sửa đổi pPresentInfo, vì vậy hãy tạo một bản sao nếu cần.
     VkPresentInfoKHR modifiedPresentInfo = *pPresentInfo;
-    // Và trỏ nó đến mảng các handle thật của chúng ta
-    modifiedPresentInfo.pSwapchains = realSwapchains.data();
+    std::vector<VkSwapchainKHR> realSwapchains;
+    
+    // Chỉ thực hiện ánh xạ nếu có swapchain để trình bày
+    if (pPresentInfo && pPresentInfo->swapchainCount > 0) {
+        realSwapchains.resize(pPresentInfo->swapchainCount);
+        for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i) {
+            auto it = g_swapchain_map.find(pPresentInfo->pSwapchains[i]);
+            if (it == g_swapchain_map.end()) {
+                fprintf(stderr, "  [ERROR] vkQueuePresentKHR được gọi với một swapchain handle không xác định!\n");
+                return VK_ERROR_DEVICE_LOST; 
+            }
+            realSwapchains[i] = it->second;
+        }
+        // Trỏ bản sao của chúng ta đến mảng các swapchain thật
+        modifiedPresentInfo.pSwapchains = realSwapchains.data();
+    }
+    // --- KẾT THÚC LOGIC ÁNH XẠ SWAPCHAIN ---
 
-
-    // -- Bước 4: Gọi hàm gốc --
-    PFN_vkQueuePresentKHR vkQueuePresentKHR_real =
-        (PFN_vkQueuePresentKHR)g_vkGetInstanceProcAddr_real(g_last_instance, "vkQueuePresentKHR");
-
-    if (!vkQueuePresentKHR_real) {
-        fprintf(stderr, "LYNXVK ERROR: Không thể lấy con trỏ hàm vkQueuePresentKHR gốc.\n");
+    // Bây giờ, chỉ cần gọi trực tiếp con trỏ hàm đã được lưu sẵn.
+    if (!g_vkQueuePresentKHR_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkQueuePresentKHR gốc là NULL!\n");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
+    
+    // Gọi hàm gốc với BẢN SAO đã được sửa đổi
+    VkResult result = g_vkQueuePresentKHR_real(queue, &modifiedPresentInfo);
 
-    // Gọi hàm thật với thông tin đã được sửa đổi hoàn toàn.
-    return vkQueuePresentKHR_real(queue, &modifiedPresentInfo);
+    fprintf(stderr, "  |-- TRẢ VỀ: %s (%d)\n", VulkanResultToString(result), result);
+
+    g_frame_counter++;
+    fprintf(stderr, "\n <<<<<<<<<< KẾT THÚC KHUNG HÌNH %llu >>>>>>>>>> \n\n", (unsigned long long)g_frame_counter - 1);
+    
+    return result;
 }
+
+// Wrapper cho vkGetPhysicalDeviceXlibPresentationSupportKHR
+// Chúng ta sẽ "lừa" ứng dụng bằng cách luôn trả về VK_TRUE.
+extern "C" VKAPI_ATTR VkBool32 VKAPI_CALL vkGetPhysicalDeviceXlibPresentationSupportKHR(
+    VkPhysicalDevice        physicalDevice,
+    uint32_t                queueFamilyIndex,
+    Display* dpy,
+    VisualID                visualID)
+{
+    fprintf(stderr, "--> LYNXVK: Đã chặn vkGetPhysicalDeviceXlibPresentationSupportKHR.\n");
+    fprintf(stderr, "  |-- Bỏ qua các tham số X11 và trả về VK_TRUE để tiếp tục.\n");
+    return VK_TRUE;
+}
+
+
 
 /*_________________________Vulkan_Destroy_____________________*/
 
@@ -1432,58 +1572,221 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(
     return VK_SUCCESS;
 }
 
-
+//debug
+// Wrapper cho vkCreateDevice (Ghi log ra stderr)
 /*
- * vkCreateDevice
- * --------------
- * Intercepts the call to create a logical device (the main interface to the GPU).
- * This is primarily a pass-through wrapper for now, with detailed logging.
- * Its main purpose is to log which extensions the application is requesting at the device level,
- * which is crucial for debugging swapchain issues.
- *
- * It is exported directly to prevent potential dynamic linking errors.
- */
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice            physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkDevice* pDevice)
 {
-    printf("LynxVK: Intercepted vkCreateDevice.\n");
+    fprintf(stderr, "--> LYNXVK: Đã vào hàm vkCreateDevice\n");
 
-    // Log the requested extensions, which is very useful for debugging.
+    // --- BẮT ĐẦU PHẦN GHI LOG CHI TIẾT ---
     if (pCreateInfo) {
-        printf("LynxVK: Application is requesting %u device extensions:\n", pCreateInfo->enabledExtensionCount);
+        fprintf(stderr, "  [INFO] Phân tích VkDeviceCreateInfo...\n");
+        fprintf(stderr, "  |-- Yêu cầu %u hàng đợi (queue families).\n", pCreateInfo->queueCreateInfoCount);
+        fprintf(stderr, "  |-- Kích hoạt %u extension cấp thiết bị:\n", pCreateInfo->enabledExtensionCount);
         for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
-            printf("LynxVK:   - %s\n", pCreateInfo->ppEnabledExtensionNames[i]);
+            fprintf(stderr, "  |   - %s\n", pCreateInfo->ppEnabledExtensionNames[i]);
+        }
+
+        // Đây là phần quan trọng nhất để gỡ lỗi res=-8
+        if (pCreateInfo->pEnabledFeatures) {
+            const VkPhysicalDeviceFeatures* features = pCreateInfo->pEnabledFeatures;
+            fprintf(stderr, "  |-- [YÊU CẦU TÍNH NĂNG TỪ ỨNG DỤNG] --\n");
+            fprintf(stderr, "  |   - robustBufferAccess: %s\n", features->robustBufferAccess ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - fullDrawIndexUint32: %s\n", features->fullDrawIndexUint32 ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - imageCubeArray: %s\n", features->imageCubeArray ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - independentBlend: %s\n", features->independentBlend ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - geometryShader: %s\n", features->geometryShader ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - tessellationShader: %s\n", features->tessellationShader ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sampleRateShading: %s\n", features->sampleRateShading ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - dualSrcBlend: %s\n", features->dualSrcBlend ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - logicOp: %s\n", features->logicOp ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - multiDrawIndirect: %s\n", features->multiDrawIndirect ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - drawIndirectFirstInstance: %s\n", features->drawIndirectFirstInstance ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - depthClamp: %s\n", features->depthClamp ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - depthBiasClamp: %s\n", features->depthBiasClamp ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - fillModeNonSolid: %s\n", features->fillModeNonSolid ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - depthBounds: %s\n", features->depthBounds ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - wideLines: %s\n", features->wideLines ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - largePoints: %s\n", features->largePoints ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - alphaToOne: %s\n", features->alphaToOne ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - multiViewport: %s\n", features->multiViewport ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - samplerAnisotropy: %s\n", features->samplerAnisotropy ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - textureCompressionETC2: %s\n", features->textureCompressionETC2 ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - textureCompressionASTC_LDR: %s\n", features->textureCompressionASTC_LDR ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - textureCompressionBC: %s\n", features->textureCompressionBC ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - occlusionQueryPrecise: %s\n", features->occlusionQueryPrecise ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - pipelineStatisticsQuery: %s\n", features->pipelineStatisticsQuery ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - vertexPipelineStoresAndAtomics: %s\n", features->vertexPipelineStoresAndAtomics ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - fragmentStoresAndAtomics: %s\n", features->fragmentStoresAndAtomics ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderTessellationAndGeometryPointSize: %s\n", features->shaderTessellationAndGeometryPointSize ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderImageGatherExtended: %s\n", features->shaderImageGatherExtended ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageImageExtendedFormats: %s\n", features->shaderStorageImageExtendedFormats ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageImageMultisample: %s\n", features->shaderStorageImageMultisample ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageImageReadWithoutFormat: %s\n", features->shaderStorageImageReadWithoutFormat ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageImageWriteWithoutFormat: %s\n", features->shaderStorageImageWriteWithoutFormat ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderUniformBufferArrayDynamicIndexing: %s\n", features->shaderUniformBufferArrayDynamicIndexing ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderSampledImageArrayDynamicIndexing: %s\n", features->shaderSampledImageArrayDynamicIndexing ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageBufferArrayDynamicIndexing: %s\n", features->shaderStorageBufferArrayDynamicIndexing ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderStorageImageArrayDynamicIndexing: %s\n", features->shaderStorageImageArrayDynamicIndexing ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderClipDistance: %s\n", features->shaderClipDistance ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderCullDistance: %s\n", features->shaderCullDistance ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderFloat64: %s\n", features->shaderFloat64 ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderInt64: %s\n", features->shaderInt64 ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderInt16: %s\n", features->shaderInt16 ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderResourceResidency: %s\n", features->shaderResourceResidency ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - shaderResourceMinLod: %s\n", features->shaderResourceMinLod ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseBinding: %s\n", features->sparseBinding ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidencyBuffer: %s\n", features->sparseResidencyBuffer ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidencyImage2D: %s\n", features->sparseResidencyImage2D ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidencyImage3D: %s\n", features->sparseResidencyImage3D ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidency2Samples: %s\n", features->sparseResidency2Samples ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidency4Samples: %s\n", features->sparseResidency4Samples ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidency8Samples: %s\n", features->sparseResidency8Samples ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidency16Samples: %s\n", features->sparseResidency16Samples ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - sparseResidencyAliased: %s\n", features->sparseResidencyAliased ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - variableMultisampleRate: %s\n", features->variableMultisampleRate ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |   - inheritedQueries: %s\n", features->inheritedQueries ? "VK_TRUE" : "VK_FALSE");
+            fprintf(stderr, "  |-- [KẾT THÚC DANH SÁCH TÍNH NĂNG] --\n");
         }
     } else {
-        fprintf(stderr, "LYNXVK WARNING: vkCreateDevice called with NULL pCreateInfo.\n");
+        fprintf(stderr, "  [WARNING] pCreateInfo là NULL.\n");
     }
+    // --- KẾT THÚC PHẦN GHI LOG CHI TIẾT ---
 
-
-    // Get the real function pointer from the driver using the stored instance.
-    // vkCreateDevice is an instance-level function pointer.
-    PFN_vkCreateDevice vkCreateDevice_real =
-        (PFN_vkCreateDevice)g_vkGetInstanceProcAddr_real(g_last_instance, "vkCreateDevice");
+    // Lấy con trỏ hàm gốc
+    PFN_vkCreateDevice vkCreateDevice_real = (PFN_vkCreateDevice)g_vkGetInstanceProcAddr_real(g_last_instance, "vkCreateDevice");
 
     if (!vkCreateDevice_real) {
-        fprintf(stderr, "LYNXVK ERROR: Failed to get real vkCreateDevice function pointer.\n");
+        fprintf(stderr, "  [ERROR] Không thể lấy con trỏ hàm vkCreateDevice gốc!\n");
+        fprintf(stderr, "<-- LYNXVK: Rời khỏi hàm vkCreateDevice với kết quả: %d (VK_ERROR_INITIALIZATION_FAILED)\n", VK_ERROR_INITIALIZATION_FAILED);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    // Call the real function with the original, unmodified parameters.
-    printf("LynxVK: --> Calling real vkCreateDevice...\n");
+    // Gọi hàm gốc
     VkResult result = vkCreateDevice_real(physicalDevice, pCreateInfo, pAllocator, pDevice);
 
-    if (result == VK_SUCCESS) {
-        printf("LynxVK: --> Real vkCreateDevice succeeded.\n");
-    } else {
-        fprintf(stderr, "LYNXVK ERROR: Real vkCreateDevice failed with result: %d\n", result);
-    }
-
+    fprintf(stderr, "<-- LYNXVK: Rời khỏi hàm vkCreateDevice với kết quả: %d\n", result);
     return result;
 }
+*/
+
+// Wrapper cho vkGetPhysicalDeviceFeatures2 (Bật tính năng giả mạo)
+
+extern "C" VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(
+    VkPhysicalDevice            physicalDevice,
+    VkPhysicalDeviceFeatures2* pFeatures)
+{
+    fprintf(stderr, "--> LYNXVK: Đã chặn vkGetPhysicalDeviceFeatures2.\n");
+
+    PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2_real =
+        (PFN_vkGetPhysicalDeviceFeatures2)g_vkGetInstanceProcAddr_real(g_last_instance, "vkGetPhysicalDeviceFeatures2");
+    
+    if (!vkGetPhysicalDeviceFeatures2_real) {
+        fprintf(stderr, "  [ERROR] LYNXVK: Không thể lấy con trỏ hàm vkGetPhysicalDeviceFeatures2 gốc.\n");
+        return;
+    }
+
+    // **QUAN TRỌNG**: Gọi hàm gốc trước tiên!
+    // Điều này sẽ điền vào tất cả các tính năng *thực sự* được hỗ trợ.
+    vkGetPhysicalDeviceFeatures2_real(physicalDevice, pFeatures);
+
+    fprintf(stderr, "  |-- Bắt đầu tìm kiếm và bật các tính năng giả mạo...\n");
+
+    // Bắt đầu duyệt chuỗi pNext để tìm các cấu trúc tính năng mở rộng
+    void* pNext = pFeatures->pNext;
+    while (pNext != NULL) {
+        // Lấy sType để xác định loại cấu trúc
+        VkStructureType sType = *(VkStructureType*)pNext;
+
+        // Tìm cấu trúc cho VK_EXT_robustness2
+        if (sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT) {
+            fprintf(stderr, "  |-- Đã tìm thấy VkPhysicalDeviceRobustness2FeaturesEXT. Bật các tính năng.\n");
+            // Ép kiểu con trỏ sang đúng loại
+            VkPhysicalDeviceRobustness2FeaturesEXT* pRobustness2Features = (VkPhysicalDeviceRobustness2FeaturesEXT*)pNext;
+            
+            // BẬT TÍNH NĂNG GIẢ MẠO
+            pRobustness2Features->robustBufferAccess2 = VK_TRUE;
+            pRobustness2Features->robustImageAccess2 = VK_TRUE;
+            pRobustness2Features->nullDescriptor = VK_TRUE;
+        }
+        
+        // Tiếp tục duyệt đến cấu trúc tiếp theo trong chuỗi
+        pNext = (*(VkBaseOutStructure**)pNext)->pNext;
+    }
+}
+
+// Wrapper cho vkCreateDevice (Can thiệp và Sửa đổi)
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
+    VkPhysicalDevice            physicalDevice,
+    const VkDeviceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDevice* pDevice)
+{
+    fprintf(stderr, "--> LYNXVK: Đã vào hàm vkCreateDevice (Chế độ Can thiệp)\n");
+
+    // Chúng ta không thể sửa đổi pCreateInfo trực tiếp vì nó là const.
+    // Vì vậy, chúng ta tạo một bản sao cục bộ để có thể thay đổi.
+    VkDeviceCreateInfo modifiedCreateInfo = *pCreateInfo;
+    VkPhysicalDeviceFeatures modifiedFeatures;
+
+    // Chỉ thực hiện sửa đổi nếu pEnabledFeatures tồn tại.
+    if (pCreateInfo->pEnabledFeatures) {
+        // Tạo một bản sao của các tính năng để có thể sửa đổi chúng.
+        modifiedFeatures = *pCreateInfo->pEnabledFeatures;
+
+        fprintf(stderr, "  [INFO] Bắt đầu can thiệp vào các yêu cầu tính năng...\n");
+
+        // --- BẮT ĐẦU CUỘC "PHẪU THUẬT" ---
+        // Dựa trên log, chúng ta biết rằng driver không hỗ trợ một số tính năng này.
+        // Chúng ta sẽ tắt chúng đi trong bản sao của mình.
+
+        if (modifiedFeatures.geometryShader) {
+            fprintf(stderr, "  [CAN THIỆP] Tắt yêu cầu 'geometryShader'.\n");
+            modifiedFeatures.geometryShader = VK_FALSE;
+        }
+
+        if (modifiedFeatures.textureCompressionBC) {
+            fprintf(stderr, "  [CAN THIỆP] Tắt yêu cầu 'textureCompressionBC'.\n");
+            modifiedFeatures.textureCompressionBC = VK_FALSE;
+        }
+        // Bạn có thể thêm các if khác ở đây để tắt các tính năng khác nếu cần
+        // ví dụ:
+        // if (modifiedFeatures.robustBufferAccess) {
+        //     fprintf(stderr, "  [CAN THIỆP] Tắt yêu cầu 'robustBufferAccess'.\n");
+        //     modifiedFeatures.robustBufferAccess = VK_FALSE;
+        // }
+
+
+        // --- KẾT THÚC CUỘC "PHẪU THUẬT" ---
+
+        // Bây giờ, trỏ cấu trúc thông tin tạo thiết bị của chúng ta đến
+        // "bản danh sách yêu cầu" đã được sửa đổi.
+        modifiedCreateInfo.pEnabledFeatures = &modifiedFeatures;
+    }
+
+    // Lấy con trỏ hàm gốc
+    PFN_vkCreateDevice vkCreateDevice_real = (PFN_vkCreateDevice)g_vkGetInstanceProcAddr_real(g_last_instance, "vkCreateDevice");
+
+    if (!vkCreateDevice_real) {
+        fprintf(stderr, "  [ERROR] Không thể lấy con trỏ hàm vkCreateDevice gốc!\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    fprintf(stderr, "  [INFO] Gọi hàm vkCreateDevice gốc với các tính năng đã được sửa đổi...\n");
+
+    // Gọi hàm gốc, nhưng với cấu trúc thông tin ĐÃ ĐƯỢC SỬA ĐỔI của chúng ta.
+    g_vkDevice = *pDevice;
+    VkResult result = vkCreateDevice_real(physicalDevice, &modifiedCreateInfo, pAllocator, pDevice);
+
+    fprintf(stderr, "<-- LYNXVK: Rời khỏi hàm vkCreateDevice với kết quả: %d\n", result);
+    return result;
+}
+
 
 
 /*
@@ -1787,70 +2090,6 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
     // Gọi hàm thật với các tham số gốc.
     vkCmdEndRenderPass_real(commandBuffer);
 }
-
-/*
- * vkEndCommandBuffer
- * ------------------
- * Cung cấp (export) trực tiếp hàm này để giải quyết việc bị bỏ qua (bypass)
- * bởi cơ chế bảng điều phối (dispatch table) của Vulkan loader/Wine.
- *
- * Đây là một "wrapper truyền qua" đơn giản. Nó sẽ được gọi trực tiếp
- * bởi Wine sau khi bảng điều phối được tạo ra lúc vkCreateDevice.
- */
-/*extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(
-    VkCommandBuffer             commandBuffer)
-{
-    printf("--> LYNXVK: ĐÃ CHẶN TRỰC TIẾP vkEndCommandBuffer cho commandBuffer %p\n", (void*)commandBuffer);
-
-    // Lấy con trỏ hàm gốc từ driver
-    // Chúng ta phải lấy nó qua GetInstanceProcAddr vì GetDeviceProcAddr có thể bị bỏ qua
-    PFN_vkEndCommandBuffer vkEndCommandBuffer_real =
-        (PFN_vkEndCommandBuffer)g_vkGetInstanceProcAddr_real(g_last_instance, "vkEndCommandBuffer");
-
-    if (!vkEndCommandBuffer_real) {
-        fprintf(stderr, "LYNXVK CRITICAL: Không thể lấy con trtrỏ hàm vkEndCommandBuffer gốc!\n");
-        return VK_ERROR_INITIALIZATION_FAILED; // Trả về một lỗi nghiêm trọng
-    }
-
-    // Gọi hàm gốc
-    VkResult result = vkEndCommandBuffer_real(commandBuffer);
-
-    printf("<-- LYNXVK: Rời khỏi vkEndCommandBuffer với kết quả: %d\n", result);
-    return result;
-}
-
-*/
-
-/*
- * vkEndCommandBuffer
- * ------------------
- * Chặn lời gọi để kết thúc việc ghi một command buffer.
- * Sau lệnh này, command buffer được coi là hoàn chỉnh và sẵn sàng
- * để được gửi đến một hàng đợi (queue) để thực thi.
- *
- * Đây là một "wrapper truyền qua" đơn giản. Handle VkCommandBuffer đã là
- * handle thật sự từ driver.
- */
-/*VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(
-    VkCommandBuffer commandBuffer)
-{
-    // Chú thích lại dòng này vì nó được gọi mỗi frame và sẽ gây spam console.
-    // Bỏ chú thích khi cần gỡ lỗi.
-    // printf("LynxVK: Đã chặn vkEndCommandBuffer.\n");
-
-    // Lấy con trỏ hàm thật từ driver.
-    PFN_vkEndCommandBuffer vkEndCommandBuffer_real =
-        (PFN_vkEndCommandBuffer)g_vkGetInstanceProcAddr_real(g_last_instance, "vkEndCommandBuffer");
-
-    if (!vkEndCommandBuffer_real) {
-        fprintf(stderr, "LYNXVK ERROR: Không thể lấy con trỏ hàm vkEndCommandBuffer gốc.\n");
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-    printf("vkEndCommandBuffer call...\n");
-    // Gọi hàm thật với các tham số gốc.
-    return vkEndCommandBuffer_real(commandBuffer);
-}
-*/
 /*
  * vkCreateSemaphore
  * -----------------
@@ -1882,3 +2121,102 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(
     return vkCreateSemaphore_real(device, pCreateInfo, pAllocator, pSemaphore);
 }
 
+// Wrapper cho vkAllocateMemory
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
+    VkDevice device,
+    const VkMemoryAllocateInfo* pAllocateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDeviceMemory* pMemory)
+{
+    if (!g_vkAllocateMemory_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkAllocateMemory gốc là NULL!\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkResult result = g_vkAllocateMemory_real(device, pAllocateInfo, pAllocator, pMemory);
+
+    if (result == VK_SUCCESS) {
+        VkDeviceSize size = pAllocateInfo->allocationSize;
+        g_total_allocated_memory += size;
+        g_memory_allocation_map[*pMemory] = size;
+
+        fprintf(stderr, "[MEMORY] Cấp phát: %llu bytes. Tổng cộng: %llu bytes (%f MB)\n",
+                (unsigned long long)size,
+                (unsigned long long)g_total_allocated_memory,
+                g_total_allocated_memory / (1024.0 * 1024.0));
+    } else {
+        fprintf(stderr, "[MEMORY] Lỗi cấp phát bộ nhớ! Kết quả: %s\n", VulkanResultToString(result));
+    }
+
+    return result;
+}
+
+// Wrapper cho vkFreeMemory
+extern "C" VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    const VkAllocationCallbacks* pAllocator)
+{
+    if (memory != VK_NULL_HANDLE) {
+        auto it = g_memory_allocation_map.find(memory);
+        if (it != g_memory_allocation_map.end()) {
+            VkDeviceSize size = it->second;
+            g_total_allocated_memory -= size;
+            g_memory_allocation_map.erase(it);
+
+            fprintf(stderr, "[MEMORY] Giải phóng: %llu bytes. Tổng cộng: %llu bytes (%f MB)\n",
+                    (unsigned long long)size,
+                    (unsigned long long)g_total_allocated_memory,
+                    g_total_allocated_memory / (1024.0 * 1024.0));
+        } else {
+            fprintf(stderr, "[MEMORY] Cảnh báo: Cố gắng giải phóng một vùng nhớ không được theo dõi!\n");
+        }
+    }
+
+    if (!g_vkFreeMemory_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkFreeMemory gốc là NULL!\n");
+        return;
+    }
+    g_vkFreeMemory_real(device, memory, pAllocator);
+}
+
+// Wrapper cho vkMapMemory
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
+    VkDevice            device,
+    VkDeviceMemory      memory,
+    VkDeviceSize        offset,
+    VkDeviceSize        size,
+    VkMemoryMapFlags    flags,
+    void** ppData)
+{
+    fprintf(stderr, "[KHUNG HÌNH %llu] vkMapMemory:\n", (unsigned long long)g_frame_counter);
+    fprintf(stderr, "  |-- Ánh xạ bộ nhớ: %p\n", (void*)memory);
+    fprintf(stderr, "  |-- Kích thước      : %llu bytes\n", (unsigned long long)size);
+
+    if (!g_vkMapMemory_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkMapMemory gốc là NULL!\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkResult result = g_vkMapMemory_real(device, memory, offset, size, flags, ppData);
+
+    fprintf(stderr, "  |-- Con trỏ dữ liệu trả về: %p\n", (result == VK_SUCCESS ? *ppData : NULL));
+    fprintf(stderr, "  |-- TRẢ VỀ: %s (%d)\n", VulkanResultToString(result), result);
+    return result;
+}
+
+// Wrapper cho vkUnmapMemory (Ghi log ra stderr)
+extern "C" VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(
+    VkDevice            device,
+    VkDeviceMemory      memory)
+{
+    fprintf(stderr, "[KHUNG HÌNH %llu] vkUnmapMemory:\n", (unsigned long long)g_frame_counter);
+    fprintf(stderr, "  |-- Hủy ánh xạ bộ nhớ: %p\n", (void*)memory);
+
+    if (!g_vkUnmapMemory_real) {
+        fprintf(stderr, "LYNXVK CRITICAL: Con trỏ hàm vkUnmapMemory gốc là NULL!\n");
+        return;
+    }
+
+    g_vkUnmapMemory_real(device, memory);
+}
